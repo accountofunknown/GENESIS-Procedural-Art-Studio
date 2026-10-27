@@ -24,35 +24,88 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
 
-      - name: Validate project structure
+      - name: Locate or extract project
+        id: project
         run: |
+          set -e
+          ROOT="$GITHUB_WORKSPACE"
+
+          # Case 1: ZIP at repo root (beginner upload layout)
+          ZIP=$(find "$ROOT" -maxdepth 1 -type f -name "*.zip" | head -n 1 || true)
+          if [ -n "$ZIP" ]; then
+            echo "Found ZIP: $ZIP"
+            mkdir -p "$ROOT/extracted"
+            unzip -q "$ZIP" -d "$ROOT/extracted"
+            # Prefer a folder that contains settings.gradle.kts
+            PROJECT=$(find "$ROOT/extracted" -type f -name "settings.gradle.kts" | head -n 1 | xargs dirname || true)
+            if [ -z "$PROJECT" ]; then
+              echo "ERROR: No settings.gradle.kts found inside ZIP"
+              find "$ROOT/extracted" -maxdepth 3 -type f | head -40
+              exit 1
+            fi
+            echo "Using project from ZIP: $PROJECT"
+            echo "project_dir=$PROJECT" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Case 2: Project already at repo root
+          if [ -f "$ROOT/settings.gradle.kts" ]; then
+            echo "Project at repository root"
+            echo "project_dir=$ROOT" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Case 3: Single nested project folder
+          PROJECT=$(find "$ROOT" -mindepth 2 -maxdepth 3 -type f -name "settings.gradle.kts" | head -n 1 | xargs dirname || true)
+          if [ -n "$PROJECT" ]; then
+            echo "Found nested project: $PROJECT"
+            echo "project_dir=$PROJECT" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "ERROR: Could not locate Android project (settings.gradle.kts)"
+          echo "Repository contents:"
+          ls -la "$ROOT"
+          exit 1
+
+      - name: Validate project structure
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        run: |
+          set -e
+          echo "Project directory: $(pwd)"
           test -f settings.gradle.kts
           test -f app/build.gradle.kts
           test -f gradlew
           chmod +x gradlew
           echo "Project structure OK"
+          ls -la
 
       - name: Unit tests
+        working-directory: ${{ steps.project.outputs.project_dir }}
         run: ./gradlew testDebugUnitTest --stacktrace
-        continue-on-error: false
 
       - name: Assemble debug APK
+        working-directory: ${{ steps.project.outputs.project_dir }}
         run: ./gradlew assembleDebug --stacktrace
 
       - name: Verify APK
+        id: apk
+        working-directory: ${{ steps.project.outputs.project_dir }}
         run: |
+          set -e
           APK=$(find app/build/outputs/apk -name "*.apk" | head -n 1)
           test -n "$APK"
           test -s "$APK"
           echo "APK: $APK"
           ls -lh "$APK"
-          echo "APK_PATH=$APK" >> $GITHUB_ENV
+          echo "apk_path=$APK" >> "$GITHUB_OUTPUT"
+          # Also copy to a known location for the upload step
+          cp "$APK" "$GITHUB_WORKSPACE/GENESIS-v0.01-debug.apk"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: GENESIS-v0.01-debug-APK
-          path: ${{ env.APK_PATH }}
+          path: GENESIS-v0.01-debug.apk
           if-no-files-found: error
           retention-days: 14
-          
